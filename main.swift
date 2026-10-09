@@ -20,10 +20,11 @@ var lastUpdated: Date?
 struct Limit {
     let label: String, pct: Double, resets: Date?
     let short: Bool  // session-style window (hours) vs weekly/monthly
+    var detail = ""  // optional extra line under the bar
 }
 
 enum Status {
-    case limits([Limit])
+    case limits([Limit], plan: String?)
     case login(String, command: String?)  // what to tell the user; command is copied on click, nil opens the app
     case error(String)
 }
@@ -69,6 +70,11 @@ func fetch(_ url: String, _ headers: [String: String], _ done: @escaping (Int?, 
     }.resume()
 }
 
+// "max" → "Max"; nil when the tool didn't say.
+func planName(_ raw: Any?) -> String? {
+    (raw as? String).flatMap { $0.isEmpty ? nil : $0.replacingOccurrences(of: "_", with: " ").capitalized }
+}
+
 func windowLabel(seconds: Double) -> String {
     let hours = Int(seconds / 3600)
     return hours < 24 ? "Session" : hours == 168 ? "Weekly" : "\(hours / 24)-day"
@@ -78,7 +84,7 @@ func windowLabel(seconds: Double) -> String {
 
 func claude(_ done: @escaping (Status?) -> Void) {
     guard let creds = jsonObject(run("/usr/bin/security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"])),
-          let token = (creds["claudeAiOauth"] as? [String: Any])?["accessToken"] as? String
+          let oauth = creds["claudeAiOauth"] as? [String: Any], let token = oauth["accessToken"] as? String
     else { return done(.login("Not signed in, click to copy “claude”", command: "claude")) }  // always shown: this is the main one
     fetch("https://api.anthropic.com/api/oauth/usage",
           ["Authorization": "Bearer \(token)", "anthropic-beta": "oauth-2025-04-20"]) { status, json in
@@ -88,7 +94,18 @@ func claude(_ done: @escaping (Status?) -> Void) {
             let w = json[key] as? [String: Any]
             return Limit(label: label, pct: w?["utilization"] as? Double ?? 0, resets: isoDate(w?["resets_at"]), short: short)
         }
-        done(.limits([limit("five_hour", "Session", short: true), limit("seven_day", "Weekly", short: false)]))
+        // rateLimitTier looks like "default_claude_max_20x"; the multiplier tells Max 5x from 20x.
+        let tier = (oauth["rateLimitTier"] as? String)?.split(separator: "_").last.flatMap { $0.hasSuffix("x") ? " \($0)" : nil } ?? ""
+        // Per-model weekly limits are null on plans that don't have them.
+        let perModel = [("seven_day_opus", "Weekly Opus"), ("seven_day_sonnet", "Weekly Sonnet")]
+            .filter { json[$0.0] is [String: Any] }.map { limit($0.0, $0.1, short: false) }
+        // Where the week's usage went, e.g. "Claude Code 88% · Chats 11%"; zero rows dropped.
+        var weekly = limit("seven_day", "Weekly", short: false)
+        weekly.detail = ((json["seven_day_breakdown"] as? [String: Any])?["rows"] as? [[String: Any]] ?? [])
+            .compactMap { r in (r["percent"] as? Double).flatMap { $0 > 0 ? "\(r["display_name"] as? String ?? "?") \(Int($0))%" : nil } }
+            .joined(separator: " · ")
+        done(.limits([limit("five_hour", "Session", short: true), weekly] + perModel,
+                     plan: planName(oauth["subscriptionType"]).map { $0 + tier }))
     }
 }
 
@@ -109,7 +126,7 @@ func codex(_ done: @escaping (Status?) -> Void) {
             return Limit(label: windowLabel(seconds: seconds), pct: w["used_percent"] as? Double ?? 0,
                          resets: (w["reset_at"] as? Double).map { Date(timeIntervalSince1970: $0) }, short: seconds < 86400)
         }
-        done(limits.isEmpty ? .error("No usage limits on this plan") : .limits(limits))
+        done(limits.isEmpty ? .error("No usage limits on this plan") : .limits(limits, plan: planName(json?["plan_type"])))
     }
 }
 
@@ -128,9 +145,53 @@ func cursor(_ done: @escaping (Status?) -> Void) {
               let pct = plan["totalPercentUsed"] as? Double
         else { return done(.error("Couldn't fetch usage")) }
         done(.limits([Limit(label: "Monthly", pct: pct,
-                            resets: isoDate(json["billingCycleEnd"]), short: false)]))
+                            resets: isoDate(json["billingCycleEnd"]), short: false)], plan: planName(json["membershipType"])))
     }
 }
+
+// MARK: - Tokens used today, summed from each tool's local session logs (no API reports them).
+
+// Lines of today's .jsonl files under dir that contain marker, oldest file first.
+func todaysLogLines(_ dir: String, _ marker: String) -> [[Substring]] {
+    let today = Calendar.current.startOfDay(for: Date())
+    let files = FileManager.default.enumerator(at: URL(fileURLWithPath: dir), includingPropertiesForKeys: [.contentModificationDateKey])?
+        .compactMap { $0 as? URL }
+        .filter { $0.pathExtension == "jsonl" && ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast) >= today } ?? []
+    return files.compactMap { try? String(contentsOf: $0, encoding: .utf8) }
+        .map { $0.split(separator: "\n").filter { $0.contains(marker) } }
+}
+
+func isToday(_ line: [String: Any]) -> Bool {
+    isoDate(line["timestamp"]).map { Calendar.current.isDateInToday($0) } ?? false
+}
+
+// Claude Code logs each assistant message's usage, sometimes repeated across lines, so dedupe by message id.
+func claudeTokensToday() -> Int {
+    var byId: [String: Int] = [:]
+    for line in todaysLogLines(NSHomeDirectory() + "/.claude/projects", "\"usage\"").joined() {
+        guard let j = jsonObject(Data(line.utf8)), isToday(j), let m = j["message"] as? [String: Any],
+              let id = m["id"] as? String, let u = m["usage"] as? [String: Any] else { continue }
+        byId[id] = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
+            .reduce(0) { $0 + (u[$1] as? Int ?? 0) }
+    }
+    return byId.values.reduce(0, +)
+}
+
+// Codex logs a running session total; today's share is the last total minus the total at midnight.
+func codexTokensToday() -> Int {
+    todaysLogLines(NSHomeDirectory() + "/.codex/sessions", "token_count").reduce(0) { sum, lines in
+        var before = 0, last = 0
+        for line in lines {
+            guard let j = jsonObject(Data(line.utf8)),
+                  let total = (((j["payload"] as? [String: Any])?["info"] as? [String: Any])?["total_token_usage"] as? [String: Any])?["total_tokens"] as? Int
+            else { continue }
+            if isToday(j) { last = total } else { before = total; last = total }
+        }
+        return sum + last - before
+    }
+}
+
+let tokenCounters: [String: () -> Int] = ["Claude": claudeTokensToday, "Codex": codexTokensToday]
 
 let providers: [(name: String, fetch: (@escaping (Status?) -> Void) -> Void)] =
     [("Claude", claude), ("Codex", codex), ("Cursor", cursor)]
@@ -192,12 +253,12 @@ func resetText(_ date: Date?) -> String {
 
 // Menu row: label + % on top, flat bar, reset time below. Neutral until 75%, same rule as the menu bar ring.
 class UsageRow: NSView {
-    let key: String, label: String, pct: Double, reset: String
+    let key: String, label: String, pct: Double, reset: String, detail: String
     var shown: Double  // where the bar is drawn; slides from the last-seen value to pct when the menu opens
-    init(_ key: String, _ label: String, _ pct: Double, _ reset: String) {
-        (self.key, self.label, self.pct, self.reset) = (key, label, pct, reset)
+    init(_ key: String, _ label: String, _ pct: Double, _ reset: String, detail: String = "") {
+        (self.key, self.label, self.pct, self.reset, self.detail) = (key, label, pct, reset, detail)
         shown = seen[key] ?? pct
-        super.init(frame: NSRect(x: 0, y: 0, width: 280, height: 54))
+        super.init(frame: NSRect(x: 0, y: 0, width: 280, height: detail.isEmpty ? 54 : 70))
         autoresizingMask = .width  // stretch to the menu's width
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -224,6 +285,8 @@ class UsageRow: NSView {
 
         (reset as NSString).draw(at: NSPoint(x: x, y: 37), withAttributes: [
             .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
+        (detail as NSString).draw(at: NSPoint(x: x, y: 52), withAttributes: [
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor])
     }
 }
 
@@ -259,9 +322,9 @@ func note(_ title: String, _ symbol: String, action: Selector? = nil, tip: Strin
 // Claude keeps its brand color; the black OpenAI and Cursor marks follow the text color so they work in dark mode.
 let brandColors = ["Claude": NSColor(srgbRed: 0.85, green: 0.47, blue: 0.34, alpha: 1)]  // #D97757
 class HeaderRow: NSView {
-    let name: String
-    init(_ name: String) {
-        self.name = name
+    let name: String, plan: String?, detail: String
+    init(_ name: String, plan: String? = nil, detail: String = "") {
+        (self.name, self.plan, self.detail) = (name, plan, detail)
         super.init(frame: NSRect(x: 0, y: 0, width: 280, height: 26))
         autoresizingMask = .width
     }
@@ -277,8 +340,16 @@ class HeaderRow: NSView {
             }.draw(in: NSRect(x: x, y: 7, width: 14, height: 14), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
             x += 20
         }
-        (name as NSString).draw(at: NSPoint(x: x, y: 6), withAttributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .bold), .foregroundColor: NSColor.secondaryLabelColor])
+        let nameAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12, weight: .bold), .foregroundColor: NSColor.secondaryLabelColor]
+        (name as NSString).draw(at: NSPoint(x: x, y: 6), withAttributes: nameAttrs)
+        if let plan {
+            (plan as NSString).draw(at: NSPoint(x: x + (name as NSString).size(withAttributes: nameAttrs).width + 6, y: 7), withAttributes: [
+                .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor])
+        }
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.tertiaryLabelColor]
+        (detail as NSString).draw(at: NSPoint(x: bounds.width - 16 - (detail as NSString).size(withAttributes: attrs).width, y: 7), withAttributes: attrs)
     }
 }
 
@@ -315,16 +386,19 @@ func addControls() {
     menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 }
 
-func render(_ results: [(String, Status)]) {
+func render(_ results: [(String, Status)], tokens: [String: Int]) {
     menu.removeAllItems()
     var session = 0.0, long = 0.0, tooltip: [String] = []
     for (name, status) in results {
         if menu.items.count > 0 { menu.addItem(.separator()) }
-        menu.addItem(row(HeaderRow(name)))
+        let today = tokens[name].flatMap { $0 > 0 ? "\($0.formatted(.number.notation(.compactName))) tokens today" : nil }
+        var plan: String?
+        if case .limits(_, let p) = status { plan = p }
+        menu.addItem(row(HeaderRow(name, plan: plan, detail: today ?? "")))
         switch status {
-        case .limits(let limits):
+        case .limits(let limits, _):
             for l in limits {
-                menu.addItem(row(UsageRow("\(name) \(l.label)", l.label, l.pct, resetText(l.resets))))
+                menu.addItem(row(UsageRow("\(name) \(l.label)", l.label, l.pct, resetText(l.resets), detail: l.detail)))
                 if l.short { session = max(session, l.pct) } else { long = max(long, l.pct) }
                 tooltip.append(String(format: "%@ %@ %.0f%%", name, l.label.lowercased(), l.pct))
                 checkAlert("\(name) \(l.label.lowercased())", l.pct, resetText(l.resets))
@@ -381,9 +455,15 @@ class Poller: NSObject, NSMenuDelegate {
             group.enter()
             p.fetch { status in DispatchQueue.main.async { results[i] = status; group.leave() } }
         }
+        var tokens: [String: Int] = [:]
+        group.enter()
+        DispatchQueue.global().async {
+            let counts = tokenCounters.mapValues { $0() }
+            DispatchQueue.main.async { tokens = counts; group.leave() }
+        }
         group.notify(queue: .main) {
             lastUpdated = Date()
-            render(zip(providers, results).compactMap { p, r in r.map { (p.name, $0) } })
+            render(zip(providers, results).compactMap { p, r in r.map { (p.name, $0) } }, tokens: tokens)
         }
     }
 }
