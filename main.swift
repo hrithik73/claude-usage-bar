@@ -36,7 +36,6 @@ func showLoginError() {
 
 func addControls() {
     menu.addItem(.separator())
-    menu.addItem(withTitle: "Send Test Alert", action: #selector(Poller.testAlert), keyEquivalent: "").target = poller
     menu.addItem(withTitle: "Refresh", action: #selector(Poller.refresh), keyEquivalent: "r").target = poller
     menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 }
@@ -151,7 +150,6 @@ func render(_ json: [String: Any]) {
 }
 
 class Poller: NSObject {
-    @objc func testAlert() { notify("Claude session limit at 92%", "Test alert. Real ones fire at 90%.") }
     @objc func refresh() {
         guard let t = token() else { showLoginError(); return }
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
