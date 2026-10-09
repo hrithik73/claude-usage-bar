@@ -2,7 +2,7 @@
 
 See your Claude Code, Codex and Cursor usage limits in the macOS menu bar, and get an alert at 90%.
 
-<img src="screenshot.png" width="360" alt="Tokenbar menu showing Claude, Codex and Cursor usage">
+<img src="screenshot-menu.png" width="360" alt="Tokenbar menu showing Claude, Codex and Cursor usage">
 
 ## Install
 
