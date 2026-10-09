@@ -6,14 +6,14 @@ cd "${0:A:h}"
 VERSION=1.1
 APP=build/ClaudeUsageBar.app
 
-if [[ ! -f AppIcon.icns ]]; then
-  swiftc make-icon.swift -o /tmp/make-icon && /tmp/make-icon icon.png
-  mkdir -p AppIcon.iconset
+if [[ ! -f icon/AppIcon.icns ]]; then
+  swiftc icon/make-icon.swift -o /tmp/make-icon && /tmp/make-icon /tmp/claude-usage-icon.png
+  mkdir -p /tmp/AppIcon.iconset
   for s in 16 32 128 256 512; do
-    sips -z $s $s icon.png --out AppIcon.iconset/icon_${s}x${s}.png >/dev/null
-    sips -z $((s*2)) $((s*2)) icon.png --out AppIcon.iconset/icon_${s}x${s}@2x.png >/dev/null
+    sips -z $s $s /tmp/claude-usage-icon.png --out /tmp/AppIcon.iconset/icon_${s}x${s}.png >/dev/null
+    sips -z $((s*2)) $((s*2)) /tmp/claude-usage-icon.png --out /tmp/AppIcon.iconset/icon_${s}x${s}@2x.png >/dev/null
   done
-  iconutil -c icns AppIcon.iconset && rm -rf AppIcon.iconset
+  iconutil -c icns /tmp/AppIcon.iconset -o icon/AppIcon.icns && rm -rf /tmp/AppIcon.iconset
 fi
 
 rm -rf build && mkdir -p $APP/Contents/MacOS $APP/Contents/Resources
@@ -22,7 +22,7 @@ for arch in arm64 x86_64; do
   swiftc -O -target $arch-apple-macos13 main.swift -o build/ClaudeUsageBar-$arch
 done
 lipo -create build/ClaudeUsageBar-* -output $APP/Contents/MacOS/ClaudeUsageBar && rm build/ClaudeUsageBar-*
-cp AppIcon.icns $APP/Contents/Resources/
+cp icon/AppIcon.icns $APP/Contents/Resources/
 cat > $APP/Contents/Info.plist <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
