@@ -3,7 +3,7 @@
 # ./build.sh dmg   build Tokenbar.dmg to share with another Mac
 set -e
 cd "${0:A:h}"
-VERSION=1.4
+VERSION=1.5
 APP=build/Tokenbar.app
 
 if [[ ! -f icon/AppIcon.icns ]]; then
