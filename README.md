@@ -16,3 +16,5 @@ Requires macOS 13+. Uses the logins already saved by Claude Code, Codex and Curs
 ./build.sh       # install locally
 ./build.sh dmg   # make the DMG
 ```
+
+Tool logos are from [Simple Icons](https://simpleicons.org) (CC0) and are trademarks of their owners.

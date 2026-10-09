@@ -22,7 +22,7 @@ for arch in arm64 x86_64; do
   swiftc -O -target $arch-apple-macos13 main.swift -o build/Tokenbar-$arch
 done
 lipo -create build/Tokenbar-* -output $APP/Contents/MacOS/Tokenbar && rm build/Tokenbar-*
-cp icon/AppIcon.icns $APP/Contents/Resources/
+cp icon/AppIcon.icns icon/marks/*.pdf $APP/Contents/Resources/
 cat > $APP/Contents/Info.plist <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

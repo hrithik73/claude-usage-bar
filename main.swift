@@ -213,11 +213,13 @@ class UsageRow: NSView {
             .foregroundColor: hot ? levelColor(pct) : NSColor.secondaryLabelColor]
         pctStr.draw(at: NSPoint(x: x + w - pctStr.size(withAttributes: pctAttrs).width, y: 6), withAttributes: pctAttrs)
 
+        // Below 75% the bar takes the system accent color, softened; orange/red stay reserved for warnings.
+        let tint = hot ? levelColor(pct) : NSColor.controlAccentColor.withAlphaComponent(0.75)
         let track = NSRect(x: x, y: 27, width: w, height: 6)
-        NSColor.quaternaryLabelColor.setFill()
+        tint.withAlphaComponent(0.15).setFill()
         NSBezierPath(roundedRect: track, xRadius: 3, yRadius: 3).fill()
         let fillW = max(track.height, track.width * min(shown, 100) / 100) // keep a dot visible at 0%
-        (hot ? levelColor(pct) : NSColor.labelColor.withAlphaComponent(0.7)).setFill()
+        tint.setFill()
         NSBezierPath(roundedRect: NSRect(x: x, y: 27, width: fillW, height: 6), xRadius: 3, yRadius: 3).fill()
 
         (reset as NSString).draw(at: NSPoint(x: x, y: 37), withAttributes: [
@@ -253,11 +255,31 @@ func note(_ title: String, _ symbol: String, action: Selector? = nil, tip: Strin
     return i
 }
 
-func header(_ title: String) -> NSMenuItem {
-    let i = NSMenuItem()
-    i.attributedTitle = NSAttributedString(string: title, attributes: [
-        .font: NSFont.systemFont(ofSize: 12, weight: .bold), .foregroundColor: NSColor.secondaryLabelColor])
-    return i
+// Section header: brand mark + tool name. Marks are Simple Icons (CC0) in icon/marks, bundled as PDFs.
+// Claude keeps its brand color; the black OpenAI and Cursor marks follow the text color so they work in dark mode.
+let brandColors = ["Claude": NSColor(srgbRed: 0.85, green: 0.47, blue: 0.34, alpha: 1)]  // #D97757
+class HeaderRow: NSView {
+    let name: String
+    init(_ name: String) {
+        self.name = name
+        super.init(frame: NSRect(x: 0, y: 0, width: 280, height: 26))
+        autoresizingMask = .width
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirty: NSRect) {
+        var x: CGFloat = 16
+        if let mark = Bundle.main.image(forResource: name.lowercased()) {
+            let color = brandColors[name] ?? .labelColor
+            NSImage(size: mark.size, flipped: false) { r in
+                mark.draw(in: r); color.set(); r.fill(using: .sourceAtop); return true
+            }.draw(in: NSRect(x: x, y: 7, width: 14, height: 14), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            x += 20
+        }
+        (name as NSString).draw(at: NSPoint(x: x, y: 6), withAttributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .bold), .foregroundColor: NSColor.secondaryLabelColor])
+    }
 }
 
 // MARK: - Alerts
@@ -298,7 +320,7 @@ func render(_ results: [(String, Status)]) {
     var session = 0.0, long = 0.0, tooltip: [String] = []
     for (name, status) in results {
         if menu.items.count > 0 { menu.addItem(.separator()) }
-        menu.addItem(header(name))
+        menu.addItem(row(HeaderRow(name)))
         switch status {
         case .limits(let limits):
             for l in limits {
