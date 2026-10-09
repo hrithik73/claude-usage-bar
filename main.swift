@@ -1,11 +1,17 @@
 import AppKit
 import UserNotifications
+import ServiceManagement
 
 // Reads the OAuth token Claude Code stores in Keychain, polls the same endpoint `/usage` uses.
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 item.button?.image = ringIcon(session: 0, weekly: 0)
+// Add to Login Items once, on first launch; after that the user's choice in Settings wins.
+if !UserDefaults.standard.bool(forKey: "loginItemSet") {
+    do { try SMAppService.mainApp.register(); UserDefaults.standard.set(true, forKey: "loginItemSet") }
+    catch { NSLog("Login item registration failed: \(error)") }
+}
 UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
 let menu = NSMenu()
 item.menu = menu

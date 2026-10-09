@@ -10,11 +10,20 @@ It reads the login Claude Code saves in your Keychain and checks the same usage 
 
 ## Install
 
-```sh
-./build.sh
-```
+**From the DMG** (any Mac on macOS 13 or later, Apple Silicon or Intel):
 
-This builds `~/Applications/ClaudeUsageBar.app`, sets it to start at login, and launches it. Run it again after you change `main.swift`.
+1. Download `ClaudeUsage.dmg` from the [latest release](../../releases/latest).
+2. Open it and drag **ClaudeUsageBar** into **Applications**.
+3. Open the app. macOS will block it the first time, because the app isn't signed with an Apple Developer ID. Go to System Settings → Privacy & Security, scroll down, and click **Open Anyway**.
+
+The app adds itself to Login Items on first launch. Make sure you're logged in to Claude Code on that Mac.
+
+**From source:**
+
+```sh
+./build.sh       # build, install to ~/Applications and launch
+./build.sh dmg   # build ClaudeUsage.dmg
+```
 
 For notifications that stay on screen, go to System Settings → Notifications → Claude Usage and choose **Persistent**.
 
@@ -28,8 +37,4 @@ Checks the 90% alert logic.
 
 ## Uninstall
 
-```sh
-launchctl bootout gui/$(id -u)/com.hritik.claude-usage-bar
-rm ~/Library/LaunchAgents/com.hritik.claude-usage-bar.plist
-rm -rf ~/Applications/ClaudeUsageBar.app
-```
+Quit the app from its menu, then delete ClaudeUsageBar from Applications (or ~/Applications if you built it from source). If it still shows in System Settings → General → Login Items, remove it there.

@@ -1,8 +1,11 @@
 #!/bin/zsh
-# Builds ClaudeUsageBar.app into ~/Applications and restarts it.
+# ./build.sh       build, install to ~/Applications and relaunch
+# ./build.sh dmg   build ClaudeUsage.dmg to share with another Mac
 set -e
 cd "${0:A:h}"
-APP=~/Applications/ClaudeUsageBar.app
+VERSION=1.1
+APP=build/ClaudeUsageBar.app
+
 if [[ ! -f AppIcon.icns ]]; then
   swiftc make-icon.swift -o /tmp/make-icon && /tmp/make-icon icon.png
   mkdir -p AppIcon.iconset
@@ -12,8 +15,13 @@ if [[ ! -f AppIcon.icns ]]; then
   done
   iconutil -c icns AppIcon.iconset && rm -rf AppIcon.iconset
 fi
-mkdir -p $APP/Contents/MacOS $APP/Contents/Resources
-swiftc -O main.swift -o $APP/Contents/MacOS/ClaudeUsageBar
+
+rm -rf build && mkdir -p $APP/Contents/MacOS $APP/Contents/Resources
+# Universal binary: Apple Silicon + Intel.
+for arch in arm64 x86_64; do
+  swiftc -O -target $arch-apple-macos13 main.swift -o build/ClaudeUsageBar-$arch
+done
+lipo -create build/ClaudeUsageBar-* -output $APP/Contents/MacOS/ClaudeUsageBar && rm build/ClaudeUsageBar-*
 cp AppIcon.icns $APP/Contents/Resources/
 cat > $APP/Contents/Info.plist <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -24,27 +32,28 @@ cat > $APP/Contents/Info.plist <<PLIST
   <key>CFBundleExecutable</key><string>ClaudeUsageBar</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSUIElement</key><true/>
-  <key>NSUserNotificationAlertStyle</key><string>alert</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSUserNotificationAlertStyle</key><string>alert</string>
 </dict></plist>
 PLIST
-codesign --force --sign - $APP
-# Start at login via LaunchAgent; KeepAlive restarts on crash but not on Quit.
-AGENT=~/Library/LaunchAgents/com.hritik.claude-usage-bar.plist
-if [[ ! -f $AGENT ]]; then
-  cat > $AGENT <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.hritik.claude-usage-bar</string>
-  <key>ProgramArguments</key><array><string>$APP/Contents/MacOS/ClaudeUsageBar</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-</dict></plist>
-PLIST
-  launchctl bootstrap gui/$(id -u) $AGENT
-else
-  pkill -x ClaudeUsageBar || true  # launchd restarts it from the new bundle
+codesign --force --sign - $APP  # ad-hoc: no Apple Developer ID, so Gatekeeper asks once on other Macs
+
+if [[ $1 == dmg ]]; then
+  rm -rf build/dmg && mkdir build/dmg && cp -R $APP build/dmg/ && ln -s /Applications build/dmg/Applications
+  hdiutil create -volname "Claude Usage" -srcfolder build/dmg -ov -format UDZO ClaudeUsage.dmg >/dev/null
+  echo "Built ClaudeUsage.dmg"
+  exit
 fi
+
+# Older versions used a LaunchAgent for login start; the app now adds itself to Login Items.
+OLD_AGENT=~/Library/LaunchAgents/com.hritik.claude-usage-bar.plist
+if [[ -f $OLD_AGENT ]]; then
+  launchctl bootout gui/$(id -u)/com.hritik.claude-usage-bar 2>/dev/null || true
+  rm $OLD_AGENT
+fi
+pkill -x ClaudeUsageBar || true
+rm -rf ~/Applications/ClaudeUsageBar.app && cp -R $APP ~/Applications/
+open ~/Applications/ClaudeUsageBar.app
