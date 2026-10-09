@@ -2,6 +2,8 @@
 
 See your Claude Code, Codex and Cursor usage limits in the macOS menu bar, and get an alert at 90%.
 
+<img src="screenshot.png" width="360" alt="Tokenbar menu showing Claude, Codex and Cursor usage">
+
 ## Install
 
 Download `Tokenbar.dmg` from [Releases](../../releases/latest) and drag the app into Applications. On first open, go to System Settings → Privacy & Security → **Open Anyway**.

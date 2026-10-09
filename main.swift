@@ -173,6 +173,7 @@ class UsageRow: NSView {
     init(_ symbol: String, _ label: String, _ pct: Double, _ reset: String) {
         (self.symbol, self.label, self.pct, self.reset) = (symbol, label, pct, reset)
         super.init(frame: NSRect(x: 0, y: 0, width: 280, height: 62))
+        autoresizingMask = .width  // stretch to the menu's width
     }
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
@@ -250,7 +251,7 @@ func render(_ results: [(String, Status)]) {
             }
         case .login(let how):
             menu.addItem(withTitle: "Not logged in", action: nil, keyEquivalent: "")
-            menu.addItem(withTitle: "\(how), then click Refresh", action: nil, keyEquivalent: "")
+            menu.addItem(withTitle: "\(how), then Refresh", action: nil, keyEquivalent: "")
         case .error(let message):
             menu.addItem(withTitle: message, action: nil, keyEquivalent: "")
         }
