@@ -6,7 +6,13 @@ See your Claude Code, Codex and Cursor usage limits in the macOS menu bar, and g
 
 ## Install
 
-Download `Tokenbar.dmg` from [Releases](../../releases/latest) and drag the app into Applications. On first open, go to System Settings → Privacy & Security → **Open Anyway**.
+```sh
+brew install hrithik73/tap/tokenbar
+```
+
+Or download `Tokenbar.dmg` from [Releases](../../releases/latest) and drag the app into Applications.
+
+Either way, on first open go to System Settings → Privacy & Security → **Open Anyway**.
 
 Requires macOS 13+. Uses the logins already saved by Claude Code, Codex and Cursor; tools you don't use are hidden.
 
