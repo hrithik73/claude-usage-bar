@@ -6,7 +6,7 @@ A small macOS menu bar app that shows how much of your Claude plan limits you've
 - **Menu:** a progress bar for each limit, with the percentage and when it resets.
 - **Alerts:** a notification when either limit crosses 90%.
 
-It reads the login Claude Code saves in your Keychain and checks the same usage endpoint that `/usage` uses, every 5 minutes. You need to be logged in to Claude Code (`claude`).
+It reads the login Claude Code saves in your Keychain and checks the same usage endpoint that `/usage` uses, every 5 minutes. You need to be logged in to Claude Code (`claude`). If you are logged out or your login has expired, the icon turns red and the menu tells you to run `claude`, then click Refresh.
 
 ## Install
 

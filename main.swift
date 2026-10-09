@@ -22,6 +22,12 @@ func showError(_ symbol: String, _ message: String) {
     addControls()
 }
 
+// No token, or the token expired (Claude Code renews it only while you use it).
+func showLoginError() {
+    showError("person.crop.circle.badge.exclamationmark", "Not logged in to Claude Code")
+    menu.insertItem(withTitle: "Run `claude` in Terminal, then click Refresh", action: nil, keyEquivalent: "", at: 1)
+}
+
 func addControls() {
     menu.addItem(.separator())
     menu.addItem(withTitle: "Send Test Alert", action: #selector(Poller.testAlert), keyEquivalent: "").target = poller
@@ -141,14 +147,17 @@ func render(_ json: [String: Any]) {
 class Poller: NSObject {
     @objc func testAlert() { notify("Claude session limit at 92%", "Test alert. Real ones fire at 90%.") }
     @objc func refresh() {
-        guard let t = token() else { showError("person.crop.circle.badge.exclamationmark", "Not logged in. Run `claude` to sign in."); return }
+        guard let t = token() else { showLoginError(); return }
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
         req.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization")
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        URLSession.shared.dataTask(with: req) { data, _, _ in
+        URLSession.shared.dataTask(with: req) { data, resp, _ in
+            let status = (resp as? HTTPURLResponse)?.statusCode
             let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             DispatchQueue.main.async {
-                if let json, json["five_hour"] != nil { render(json) } else { showError("exclamationmark.triangle", "Couldn't fetch usage. Offline, or open Claude Code to refresh login.") }
+                if status == 401 || status == 403 { showLoginError() }
+                else if let json, json["five_hour"] != nil { render(json) }
+                else { showError("exclamationmark.triangle", "Couldn't fetch usage. Check your connection.") }
             }
         }.resume()
     }
