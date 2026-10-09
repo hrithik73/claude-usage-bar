@@ -15,15 +15,16 @@ if !UserDefaults.standard.bool(forKey: "loginItemSet") {
 UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
 let menu = NSMenu()
 item.menu = menu
+var lastUpdated: Date?
 
 struct Limit {
-    let label: String, symbol: String, pct: Double, resets: Date?
+    let label: String, pct: Double, resets: Date?
     let short: Bool  // session-style window (hours) vs weekly/monthly
 }
 
 enum Status {
     case limits([Limit])
-    case login(String)  // what to run to log in again
+    case login(String, command: String?)  // what to tell the user; command is copied on click, nil opens the app
     case error(String)
 }
 
@@ -70,7 +71,7 @@ func fetch(_ url: String, _ headers: [String: String], _ done: @escaping (Int?, 
 
 func windowLabel(seconds: Double) -> String {
     let hours = Int(seconds / 3600)
-    return hours < 24 ? "Session · \(hours) hours" : hours == 168 ? "Weekly · 7 days" : "\(hours / 24) days"
+    return hours < 24 ? "Session" : hours == 168 ? "Weekly" : "\(hours / 24)-day"
 }
 
 // MARK: - Providers. Each returns nil when that tool isn't installed or logged in on this Mac.
@@ -78,17 +79,16 @@ func windowLabel(seconds: Double) -> String {
 func claude(_ done: @escaping (Status?) -> Void) {
     guard let creds = jsonObject(run("/usr/bin/security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"])),
           let token = (creds["claudeAiOauth"] as? [String: Any])?["accessToken"] as? String
-    else { return done(.login("Run `claude` in Terminal")) }  // always shown: this is the main one
+    else { return done(.login("Not signed in, click to copy “claude”", command: "claude")) }  // always shown: this is the main one
     fetch("https://api.anthropic.com/api/oauth/usage",
           ["Authorization": "Bearer \(token)", "anthropic-beta": "oauth-2025-04-20"]) { status, json in
-        if status == 401 || status == 403 { return done(.login("Run `claude` in Terminal")) }
+        if status == 401 || status == 403 { return done(.login("Signed out, click to copy “claude”", command: "claude")) }
         guard let json, json["five_hour"] != nil else { return done(.error("Couldn't fetch usage")) }
-        func limit(_ key: String, _ label: String, _ symbol: String, short: Bool) -> Limit {
+        func limit(_ key: String, _ label: String, short: Bool) -> Limit {
             let w = json[key] as? [String: Any]
-            return Limit(label: label, symbol: symbol, pct: w?["utilization"] as? Double ?? 0, resets: isoDate(w?["resets_at"]), short: short)
+            return Limit(label: label, pct: w?["utilization"] as? Double ?? 0, resets: isoDate(w?["resets_at"]), short: short)
         }
-        done(.limits([limit("five_hour", "Session · 5 hours", "clock.fill", short: true),
-                      limit("seven_day", "Weekly · 7 days", "calendar", short: false)]))
+        done(.limits([limit("five_hour", "Session", short: true), limit("seven_day", "Weekly", short: false)]))
     }
 }
 
@@ -101,13 +101,12 @@ func codex(_ done: @escaping (Status?) -> Void) {
     var headers = ["Authorization": "Bearer \(token)", "User-Agent": "codex-cli"]
     headers["ChatGPT-Account-Id"] = tokens["account_id"] as? String
     fetch("https://chatgpt.com/backend-api/wham/usage", headers) { status, json in
-        if status == 401 || status == 403 { return done(.login("Run `codex login` in Terminal")) }
+        if status == 401 || status == 403 { return done(.login("Signed out, click to copy “codex login”", command: "codex login")) }
         guard let rate = json?["rate_limit"] as? [String: Any] else { return done(.error("Couldn't fetch usage")) }
         let limits = ["primary_window", "secondary_window"].compactMap { key -> Limit? in
             guard let w = rate[key] as? [String: Any] else { return nil }
             let seconds = w["limit_window_seconds"] as? Double ?? 0
-            return Limit(label: windowLabel(seconds: seconds), symbol: seconds < 86400 ? "clock.fill" : "calendar",
-                         pct: w["used_percent"] as? Double ?? 0,
+            return Limit(label: windowLabel(seconds: seconds), pct: w["used_percent"] as? Double ?? 0,
                          resets: (w["reset_at"] as? Double).map { Date(timeIntervalSince1970: $0) }, short: seconds < 86400)
         }
         done(limits.isEmpty ? .error("No usage limits on this plan") : .limits(limits))
@@ -122,13 +121,13 @@ func cursor(_ done: @escaping (Status?) -> Void) {
           let token = String(data: out, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty
     else { return done(nil) }
     guard let sub = jwtPayload(token)?["sub"] as? String, let user = sub.split(separator: "|").last
-    else { return done(.login("Open Cursor and sign in")) }
+    else { return done(.login("Signed out, click to open Cursor", command: nil)) }
     fetch("https://cursor.com/api/usage-summary", ["Cookie": "WorkosCursorSessionToken=\(user)%3A%3A\(token)"]) { status, json in
-        if status == 401 || status == 403 { return done(.login("Open Cursor and sign in")) }
+        if status == 401 || status == 403 { return done(.login("Signed out, click to open Cursor", command: nil)) }
         guard let json, let plan = (json["individualUsage"] as? [String: Any])?["plan"] as? [String: Any],
               let pct = plan["totalPercentUsed"] as? Double
         else { return done(.error("Couldn't fetch usage")) }
-        done(.limits([Limit(label: "Monthly · billing cycle", symbol: "calendar", pct: pct,
+        done(.limits([Limit(label: "Monthly", pct: pct,
                             resets: isoDate(json["billingCycleEnd"]), short: false)]))
     }
 }
@@ -162,52 +161,102 @@ func ringIcon(session: Double, weekly: Double) -> NSImage {
     return img
 }
 
-func resetText(_ date: Date?) -> String {
-    guard let date else { return "" }
-    return "Resets " + RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
+// Relative within a day ("in 2 hours"), otherwise the exact moment ("Tue 9:00 AM"), since "in 4 days" is vague.
+// Menu bar ring glides to new values after a refresh, so a change is noticeable without being loud.
+var ringShown = (session: 0.0, weekly: 0.0)
+var ringTimer: Timer?
+func setRing(session: Double, weekly: Double) {
+    ringTimer?.invalidate()
+    let from = ringShown, start = CACurrentMediaTime(), duration = 0.6
+    func step(_ e: Double) {
+        ringShown = (from.session + (session - from.session) * e, from.weekly + (weekly - from.weekly) * e)
+        item.button?.image = ringIcon(session: ringShown.session, weekly: ringShown.weekly)
+    }
+    if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || (from.session == session && from.weekly == weekly) { return step(1) }
+    ringTimer = Timer(timeInterval: 1.0 / 60, repeats: true) { timer in
+        let t = min((CACurrentMediaTime() - start) / duration, 1)
+        step(1 - pow(1 - t, 3))  // ease-out cubic
+        if t >= 1 { timer.invalidate() }
+    }
+    RunLoop.main.add(ringTimer!, forMode: .common)
 }
 
-// Menu row: icon + label + % on top, rounded capsule bar, reset time below.
+func resetText(_ date: Date?) -> String {
+    guard let date else { return "" }
+    if date.timeIntervalSinceNow < 86400 {
+        return "Resets " + RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
+    }
+    let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate("EEEjmm")
+    return "Resets " + f.string(from: date)
+}
+
+// Menu row: label + % on top, flat bar, reset time below. Neutral until 75%, same rule as the menu bar ring.
 class UsageRow: NSView {
-    let symbol: String, label: String, pct: Double, reset: String
-    init(_ symbol: String, _ label: String, _ pct: Double, _ reset: String) {
-        (self.symbol, self.label, self.pct, self.reset) = (symbol, label, pct, reset)
-        super.init(frame: NSRect(x: 0, y: 0, width: 280, height: 62))
+    let key: String, label: String, pct: Double, reset: String
+    var shown: Double  // where the bar is drawn; slides from the last-seen value to pct when the menu opens
+    init(_ key: String, _ label: String, _ pct: Double, _ reset: String) {
+        (self.key, self.label, self.pct, self.reset) = (key, label, pct, reset)
+        shown = seen[key] ?? pct
+        super.init(frame: NSRect(x: 0, y: 0, width: 280, height: 54))
         autoresizingMask = .width  // stretch to the menu's width
     }
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
 
     override func draw(_ dirty: NSRect) {
-        let x: CGFloat = 16, w = bounds.width - 32, color = levelColor(pct)
-        let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold).applying(.init(paletteColors: [color]))
-        NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(cfg)?
-            .draw(in: NSRect(x: x, y: 9, width: 15, height: 15))
-        (label as NSString).draw(at: NSPoint(x: x + 21, y: 8), withAttributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: NSColor.labelColor])
+        let x: CGFloat = 16, w = bounds.width - 32, hot = pct >= 75
+        (label as NSString).draw(at: NSPoint(x: x, y: 6), withAttributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium), .foregroundColor: NSColor.labelColor])
         let pctStr = String(format: "%.0f%%", pct) as NSString
         let pctAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .bold), .foregroundColor: color]
-        pctStr.draw(at: NSPoint(x: x + w - pctStr.size(withAttributes: pctAttrs).width, y: 8), withAttributes: pctAttrs)
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: hot ? .semibold : .regular),
+            .foregroundColor: hot ? levelColor(pct) : NSColor.secondaryLabelColor]
+        pctStr.draw(at: NSPoint(x: x + w - pctStr.size(withAttributes: pctAttrs).width, y: 6), withAttributes: pctAttrs)
 
-        let track = NSRect(x: x, y: 30, width: w, height: 8)
+        let track = NSRect(x: x, y: 27, width: w, height: 6)
         NSColor.quaternaryLabelColor.setFill()
-        NSBezierPath(roundedRect: track, xRadius: 4, yRadius: 4).fill()
-        let fillW = max(track.height, track.width * min(pct, 100) / 100) // keep a dot visible at 0%
-        NSGradient(starting: color.withAlphaComponent(0.7), ending: color)?
-            .draw(in: NSBezierPath(roundedRect: NSRect(x: x, y: 30, width: fillW, height: 8), xRadius: 4, yRadius: 4), angle: 0)
+        NSBezierPath(roundedRect: track, xRadius: 3, yRadius: 3).fill()
+        let fillW = max(track.height, track.width * min(shown, 100) / 100) // keep a dot visible at 0%
+        (hot ? levelColor(pct) : NSColor.labelColor.withAlphaComponent(0.7)).setFill()
+        NSBezierPath(roundedRect: NSRect(x: x, y: 27, width: fillW, height: 6), xRadius: 3, yRadius: 3).fill()
 
-        (reset as NSString).draw(at: NSPoint(x: x, y: 43), withAttributes: [
+        (reset as NSString).draw(at: NSPoint(x: x, y: 37), withAttributes: [
             .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
     }
 }
 
+// Bars whose value changed since the menu was last open glide to the new value; unchanged rows stay still.
+// Timer runs in .common mode so it ticks while the menu is tracking.
+var seen: [String: Double] = [:]
+var glide: Timer?, menuOpen = false
+func glideChangedRows() {
+    let rows = menu.items.compactMap { $0.view as? UsageRow }.filter { $0.shown != $0.pct }
+    glide?.invalidate()
+    guard !rows.isEmpty else { return }
+    if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { return rows.forEach { $0.shown = $0.pct; $0.needsDisplay = true } }
+    let from = rows.map(\.shown), start = CACurrentMediaTime(), duration = 0.45
+    glide = Timer(timeInterval: 1.0 / 60, repeats: true) { timer in
+        let t = min((CACurrentMediaTime() - start) / duration, 1), e = 1 - pow(1 - t, 3)  // ease-out cubic
+        for (r, f) in zip(rows, from) { r.shown = f + (r.pct - f) * e; r.needsDisplay = true }
+        if t >= 1 { timer.invalidate() }
+    }
+    RunLoop.main.add(glide!, forMode: .common)
+}
+
 func row(_ v: NSView) -> NSMenuItem { let i = NSMenuItem(); i.view = v; return i }
+
+func note(_ title: String, _ symbol: String, action: Selector? = nil, tip: String? = nil) -> NSMenuItem {
+    let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
+    i.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+    i.target = poller
+    i.toolTip = tip
+    return i
+}
 
 func header(_ title: String) -> NSMenuItem {
     let i = NSMenuItem()
-    i.attributedTitle = NSAttributedString(string: title.uppercased(), attributes: [
-        .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor])
+    i.attributedTitle = NSAttributedString(string: title, attributes: [
+        .font: NSFont.systemFont(ofSize: 12, weight: .bold), .foregroundColor: NSColor.secondaryLabelColor])
     return i
 }
 
@@ -229,8 +278,17 @@ func checkAlert(_ name: String, _ pct: Double, _ reset: String) {
 
 // MARK: - Menu
 
+let updatedItem = NSMenuItem()
+func updateFooter() {
+    let text = lastUpdated.map { "Updated " + RelativeDateTimeFormatter().localizedString(for: $0, relativeTo: Date()) } ?? "Updating…"
+    updatedItem.attributedTitle = NSAttributedString(string: text, attributes: [
+        .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor])
+}
+
 func addControls() {
     menu.addItem(.separator())
+    updateFooter()
+    menu.addItem(updatedItem)
     menu.addItem(withTitle: "Refresh", action: #selector(Poller.refresh), keyEquivalent: "r").target = poller
     menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 }
@@ -244,27 +302,31 @@ func render(_ results: [(String, Status)]) {
         switch status {
         case .limits(let limits):
             for l in limits {
-                menu.addItem(row(UsageRow(l.symbol, l.label, l.pct, resetText(l.resets))))
+                menu.addItem(row(UsageRow("\(name) \(l.label)", l.label, l.pct, resetText(l.resets))))
                 if l.short { session = max(session, l.pct) } else { long = max(long, l.pct) }
-                tooltip.append(String(format: "%@ %@ %.0f%%", name, l.label.components(separatedBy: " · ")[0].lowercased(), l.pct))
-                checkAlert("\(name) \(l.label.components(separatedBy: " · ")[0].lowercased())", l.pct, resetText(l.resets))
+                tooltip.append(String(format: "%@ %@ %.0f%%", name, l.label.lowercased(), l.pct))
+                checkAlert("\(name) \(l.label.lowercased())", l.pct, resetText(l.resets))
             }
-        case .login(let how):
-            menu.addItem(withTitle: "Not logged in", action: nil, keyEquivalent: "")
-            menu.addItem(withTitle: "\(how), then Refresh", action: nil, keyEquivalent: "")
+        case .login(let title, let command):
+            let fix = command == nil
+                ? note(title, "arrow.up.forward.app", action: #selector(Poller.openApp(_:)), tip: "Sign in, then Refresh")
+                : note(title, "doc.on.doc", action: #selector(Poller.copyCommand(_:)), tip: "Run it in Terminal, then Refresh")
+            fix.representedObject = command ?? name
+            menu.addItem(fix)
         case .error(let message):
-            menu.addItem(withTitle: message, action: nil, keyEquivalent: "")
+            menu.addItem(note(message, "exclamationmark.triangle"))
         }
     }
     if results.isEmpty {
-        menu.addItem(withTitle: "No Claude Code, Codex or Cursor login found", action: nil, keyEquivalent: "")
+        menu.addItem(note("No Claude Code, Codex or Cursor login found", "exclamationmark.triangle"))
     }
     let anyLimits = results.contains { if case .limits = $0.1 { return true } else { return false } }
     if anyLimits {
         item.button?.contentTintColor = nil
-        item.button?.image = ringIcon(session: session, weekly: long)
+        setRing(session: session, weekly: long)
         item.button?.toolTip = tooltip.joined(separator: "\n")
     } else {
+        ringTimer?.invalidate(); ringShown = (0, 0)
         let img = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: "No usage available")
         img?.isTemplate = true
         item.button?.image = img
@@ -272,10 +334,25 @@ func render(_ results: [(String, Status)]) {
         item.button?.toolTip = "No usage available"
     }
     addControls()
+    if menuOpen { glideChangedRows() }  // a refresh landed while the menu is showing
 }
 
-class Poller: NSObject {
+class Poller: NSObject, NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) { menuOpen = true; updateFooter(); glideChangedRows() }
+    func menuDidClose(_ menu: NSMenu) {
+        menuOpen = false
+        glide?.invalidate()
+        for r in menu.items.compactMap({ $0.view as? UsageRow }) { r.shown = r.pct; seen[r.key] = r.pct }
+    }
+
+    @objc func copyCommand(_ sender: NSMenuItem) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(sender.representedObject as! String, forType: .string)
+    }
+    @objc func openApp(_ sender: NSMenuItem) { _ = run("/usr/bin/open", ["-a", sender.representedObject as! String]) }
+
     @objc func refresh() {
+        lastUpdated = nil
         let group = DispatchGroup()
         var results = [Status?](repeating: nil, count: providers.count)
         for (i, p) in providers.enumerated() {
@@ -283,12 +360,14 @@ class Poller: NSObject {
             p.fetch { status in DispatchQueue.main.async { results[i] = status; group.leave() } }
         }
         group.notify(queue: .main) {
+            lastUpdated = Date()
             render(zip(providers, results).compactMap { p, r in r.map { (p.name, $0) } })
         }
     }
 }
 
 let poller = Poller()
+menu.delegate = poller
 addControls()
 poller.refresh()
 Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in poller.refresh() } // ponytail: 5-min poll, endpoints are rate-limited
