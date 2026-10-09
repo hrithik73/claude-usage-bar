@@ -3,7 +3,7 @@
 # ./build.sh dmg   build ClaudeUsage.dmg to share with another Mac
 set -e
 cd "${0:A:h}"
-VERSION=1.1
+VERSION=1.2
 APP=build/ClaudeUsageBar.app
 
 if [[ ! -f icon/AppIcon.icns ]]; then
